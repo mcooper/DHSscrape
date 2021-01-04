@@ -1,5 +1,6 @@
 library(rvest)
 library(tidyverse)
+library(countrycode)
 
 url <- 'https://dhsprogram.com/data/available-datasets.cfm'
 
@@ -25,22 +26,45 @@ comb <- mapply(FUN=function(t, c){t$country <-c; t},
 	mutate(Survey = gsub("\\n.*$", "", Survey), 
 				 StartYear = as.numeric(str_extract(Survey, '\\d{4}')),
 				 EndYear = as.numeric(str_extract(Survey, '\\d{2}$')),
-				 EndYear = ifelse(EndYear > 50, 1900 + EndYear, 2000 + EndYear)) %>%
-	data.frame
+				 EndYear = ifelse(EndYear > 50, 1900 + EndYear, 2000 + EndYear),
+         cc = countrycode(country, 'country.name', 'dhs'),
+         num = as.numeric(as.roman(gsub('DHS-', '', ifelse(Phase != 'Other', Phase, NA))))) %>%
+  filter(!`Survey Datasets` %in% c('Not Applicable', 'mics.unicef.org', 
+                                   'Not In Public Domain', 'Restricted Data')) %>%
+  group_by(cc, num) %>%
+  mutate(subversion = n():1) %>%
+  ungroup %>%
+  mutate(survey_code = paste0(cc, '-', num, '-', subversion)) %>%
+  data.frame
 
-#Determine countries with small gaps between surveys
-dat <- comb %>%
-	filter(GPS.Datasets == 'Data Available',
-				 Type %in% c('Continuous DHS', 'Standard DHS', 'Interim DHS',
-										 'MIS', 'AIS', 'MICS', 'Special DHS')) %>%
-	arrange(country, EndYear) %>%
-	filter(EndYear > 2000) %>%
-	group_by(country) %>%
-	mutate(Range=c(min(EndYear)-2000, diff(EndYear))) %>%
-	select(country, EndYear, Range) %>%
-	filter(all(Range < 8)) %>%
-	summarize(EndYear=max(EndYear),
-						MaxGap=max(Range),
-						n()) %>%
-	arrange(EndYear) %>%
-	data.frame()
+#Get all that I have
+# rclone ls az:mortalityblob/dhsraw > ~/DHSscrape/dhsraw
+have <- read.csv('~/DHSscrape/dhsraw', header=F, stringsAsFactors=F) %>%
+  mutate(V1 = tolower(substr(V1, 11, 18)),
+         cc = toupper(substr(V1, 1, 2)),
+         num = substr(V1, 5, 5),
+         subversion=ifelse(toupper(substr(V1, 6, 6)) %in% as.character(seq(0, 9)), 1,
+                     ifelse(toupper(substr(V1, 6, 6)) %in% LETTERS[1:8], 2, 
+                            ifelse(toupper(substr(V1, 6, 6)) %in% LETTERS[9:17], 3, 
+                                   ifelse(toupper(substr(V1, 6, 6)) %in% LETTERS[18:26],
+                                          4, '')))),
+         survey_code = paste0(cc, '-', num, '-', subversion)) %>%
+  select(cc, num, subversion) %>%
+  unique %>%
+  mutate(survey_code = paste0(cc, '-', num, '-', subversion))
+  
+need <- comb %>%
+  filter(!survey_code %in% have$survey_code,
+         Survey.Datasets == 'Data Available',
+         GPS.Datasets == 'Data Available')
+
+cat(as.character(down$V1)[!down$V2 %in% have$V1], file='~/new_downloads', sep='\n')
+
+library(rnaturalearth)
+library(sf)
+library(countrycode)
+cty <- ne_countries(returnclass='sf')
+cty$in_dhs <- cty$iso_a3 %in% countrycode(comb$country, 'country.name', 'iso3c')
+
+ggplot() + 
+  geom_sf(data=cty, aes(fill=in_dhs))
