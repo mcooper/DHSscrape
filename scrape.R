@@ -1,6 +1,11 @@
+library(rdhs)
 library(rvest)
 library(tidyverse)
 library(countrycode)
+
+#################################
+# Scrape Data from DHS Website
+# (Needed to Get DHS Number (1-8)
 
 url <- 'https://dhsprogram.com/data/available-datasets.cfm'
 
@@ -19,7 +24,7 @@ tables <- webpage %>%
 	html_nodes("table") %>%
 	html_table()
 
-comb <- mapply(FUN=function(t, c){t$country <-c; t},
+scrape <- mapply(FUN=function(t, c){t$country <-c; t},
 			 t=tables,
 			 c=countries, SIMPLIFY=F) %>%
 	bind_rows() %>%
@@ -28,14 +33,21 @@ comb <- mapply(FUN=function(t, c){t$country <-c; t},
 				 EndYear = as.numeric(str_extract(Survey, '\\d{2}$')),
 				 EndYear = ifelse(EndYear > 50, 1900 + EndYear, 2000 + EndYear),
          cc = countrycode(country, 'country.name', 'dhs'),
-         num = as.numeric(as.roman(gsub('DHS-', '', ifelse(Phase != 'Other', Phase, NA))))) %>%
-  filter(!`Survey Datasets` %in% c('Not Applicable', 'mics.unicef.org', 
-                                   'Not In Public Domain', 'Restricted Data')) %>%
+         num = as.numeric(as.roman(gsub('DHS-', '', ifelse(Phase != 'Other', Phase, NA)))),
+         num = ifelse(num == 0, 1, num)) %>%
   group_by(cc, num) %>%
   mutate(subversion = n():1) %>%
   ungroup %>%
   mutate(survey_code = paste0(cc, '-', num, '-', subversion)) %>%
   data.frame
+
+#################################
+# Get DHS API data
+# (Has survey release date)
+
+surveys <- dhs_surveys() %>%
+  mutate(Survey = paste(CountryName, SurveyYearLabel)) %>%
+  select(Survey, ReleaseDate)
 
 #Get all that I have
 # rclone ls az:mortalityblob/dhsraw > ~/DHSscrape/dhsraw
@@ -51,20 +63,27 @@ have <- read.csv('~/DHSscrape/dhsraw', header=F, stringsAsFactors=F) %>%
          survey_code = paste0(cc, '-', num, '-', subversion)) %>%
   select(cc, num, subversion) %>%
   unique %>%
-  mutate(survey_code = paste0(cc, '-', num, '-', subversion))
-  
+  mutate(num = ifelse(num == "0", 1, num),
+         survey_code = paste0(cc, '-', num, '-', subversion))
+
 need <- comb %>%
   filter(!survey_code %in% have$survey_code,
          Survey.Datasets == 'Data Available',
          GPS.Datasets == 'Data Available')
 
-cat(as.character(down$V1)[!down$V2 %in% have$V1], file='~/new_downloads', sep='\n')
+#There are a number of surveys with different match and 
 
-library(rnaturalearth)
-library(sf)
-library(countrycode)
-cty <- ne_countries(returnclass='sf')
-cty$in_dhs <- cty$iso_a3 %in% countrycode(comb$country, 'country.name', 'iso3c')
+##############################################################
+# Honestly the easiest thing is to just record the last date
+# and check later to see what has been published since then
 
-ggplot() + 
-  geom_sf(data=cty, aes(fill=in_dhs))
+library(rdhs)
+library(lubridate)
+library(tidyverse)
+
+LAST_DOWNLOAD_DATE <- '2021-01-12'
+
+surveys <- dhs_surveys()
+
+surveys <- surveys %>%
+  filter(ymd(ReleaseDate) > ymd(LAST_DOWNLOAD_DATE))
